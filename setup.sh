@@ -81,6 +81,7 @@ BROKER_PASSWORD=$BROKER_PASSWORD
 # 💾 Database Configuration (DATABASE_*)
 # =================================================================
 DATABASE_URL=$DATABASE_URL
+DATABASE_USED_SCHEMA="public"
 
 # =================================================================
 # 📊 Market Data Feed Manager Configuration (MARKET_DATA_*)
@@ -131,7 +132,7 @@ echo -e "${GREEN}🐳 Pulling required Docker images...${NC}"
 
 # Pull Docker images in parallel
 docker compose pull &
-docker pull hummingbot/hummingbot:latest &
+docker pull public.ecr.aws/z9d5t5x0/shaker114/hummingbot_v2.7_image:latest &
 
 # Wait for both operations to complete
 wait
