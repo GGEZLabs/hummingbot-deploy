@@ -132,7 +132,7 @@ echo -e "${GREEN}🐳 Pulling required Docker images...${NC}"
 
 # Pull Docker images in parallel
 docker compose pull &
-docker pull public.ecr.aws/z9d5t5x0/shaker114/hummingbot_v2.7_image:latest &
+docker public.ecr.aws/s2m1f3k2/ggezlabs/hummingbot &
 
 # Wait for both operations to complete
 wait
