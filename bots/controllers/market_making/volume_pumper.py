@@ -1,10 +1,14 @@
 from typing import List
+
 from pydantic import Field
+
 from hummingbot.core.data_type.order_candidate import OrderCandidate
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
+from hummingbot.strategy_v2.controllers.volume_pumper_controller_base import (
+    VolumePumperConfigBase,
+    VolumePumperControllerBase,
+)
 from hummingbot.strategy_v2.executors.order_executor.data_types import ExecutionStrategy, OrderExecutorConfig
-from hummingbot.strategy_v2.controllers.volume_pumper_controller_base import VolumePumperControllerBase
-from hummingbot.strategy_v2.controllers.volume_pumper_controller_base import VolumePumperConfigBase
 
 
 class VolumePumperConfig(VolumePumperConfigBase):
@@ -17,7 +21,7 @@ class VolumePumperController(VolumePumperControllerBase):
         super().__init__(config, *args, **kwargs)
         self.config = config
 
-    def get_executor_config(self, order: OrderCandidate):
+    def get_executor_config(self, order: OrderCandidate, is_paywall_order: bool = False):
         return OrderExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.exchange,
@@ -27,4 +31,5 @@ class VolumePumperController(VolumePumperControllerBase):
             # triple_barrier_config=self.config.triple_barrier_config,
             side=order.order_side,
             execution_strategy=ExecutionStrategy.LIMIT,
+            is_paywall_order=is_paywall_order,
         )
