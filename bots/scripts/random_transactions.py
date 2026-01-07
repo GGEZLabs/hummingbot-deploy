@@ -1,29 +1,29 @@
-import asyncio
 import os
 import random
+import time
 from typing import Dict, List
 
-import requests
+from pydantic import Field, validator
+
 from hummingbot.client.config.config_data_types import BaseClientModel, ClientFieldData
 from hummingbot.connector.connector_base import ConnectorBase
-from hummingbot.core.api_throttler.async_throttler import AsyncThrottler
-from hummingbot.core.api_throttler.data_types import RateLimit
-from hummingbot.core.utils.async_utils import safe_ensure_future
-from hummingbot.core.web_assistant.connections.data_types import RESTMethod
-from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
-from pydantic import Field, validator
+from hummingbot.strategy_v2.utils.cosmos_grpc_client import CosmosGrpcClient
 
 
 class RandomTransactionConfig(BaseClientModel):
     script_file_name: str = Field(default_factory=lambda: os.path.basename(__file__))
-    send_msg_url: str = Field(
-        "",
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Send message endpoint"),
+    chain_id: str = Field(
+        "ggezchain",
+        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "chain ID"),
     )
-    ggezchain_rest_url: str = Field(
-        "https://drest.ggez.one/cosmos/bank/v1beta1/spendable_balances",
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Get balance endpoint"),
+    grpc_url: str = Field(
+        "172.21.10.116:9090",
+        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "GRPC endpoint"),
+    )
+    denom: str = Field(
+        "uggez1",
+        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Denom"),
     )
     mnemonic_keys_with_addresses: List[Dict[str, str]] = Field(
         default=[],
@@ -62,9 +62,16 @@ class RandomTransactionConfig(BaseClientModel):
                     mnemonic_objects.append({"key": mnemonic.strip(), "address": address.strip()})
                 except ValueError:
                     raise ValueError(
-                        "Invalid format. Please provide input in the format: " "'mnemonic1:address1,mnemonic2:address2,...'"
+                        "Invalid format. Please provide input in the format: "
+                        "'mnemonic1:address1,mnemonic2:address2,...'"
                     )
+                if len(mnemonic_objects) < 2:
+                    raise ValueError("At least two mnemonic keys with addresses are required.")
             return mnemonic_objects
+        elif isinstance(v, list):
+            if len(v) < 2:
+                raise ValueError("At least two mnemonic keys with addresses are required.")
+            return v
         return v
 
 
@@ -76,52 +83,62 @@ class RandomTransaction(ScriptStrategyBase):
     def __init__(self, connectors: Dict[str, ConnectorBase], config: RandomTransactionConfig):
         super().__init__(connectors)
         self.config = config
-        self._task = None
+        self.cosmos_grpc_client = CosmosGrpcClient(
+            grpc_url=self.config.grpc_url,
+            chain_id=self.config.chain_id,
+        )
+        self.last_tx_timestamp = 0
+        self.current_random_delay = 0
+        self.accounts = [
+            {"key": entry["key"], "address": entry["address"]} for entry in self.config.mnemonic_keys_with_addresses
+        ]
+        self.cumulating_transactions = self.cumulating_transactions()
 
-    rate_limits = [
-        RateLimit(limit_id="Limits", limit=6000, time_interval=100),
-    ]
+    @property
+    def is_ready_to_do_tx(self):
+        return self.current_timestamp - self.last_tx_timestamp > self.current_random_delay
 
     def on_tick(self):
-        if self._task is None or self._task.done():
-            self._task = safe_ensure_future(self.schedule_random_transactions())
+        if self.is_ready_to_do_tx:
+            self.last_tx_timestamp = self.current_timestamp
+            self.current_random_delay = random.randint(self.config.min_delay, self.config.max_delay)
+            self.execute_random_transactions()
 
-    # send token using ggez api
-    async def send_tokens_via_api(self, mnemonic, address_from, address_to, amount):
-        payload = {
-            "mnemonic_phrase": mnemonic,
-            "address_from": address_from,
-            "address_to": address_to,
-            "amount": [{"amount": str(amount), "denom": "uggez1"}],
-        }
-
+    # send token using ggez grpc client
+    def send_tokens(self, mnemonic, address_from, address_to, amount):
         try:
-            factory = WebAssistantsFactory(self.create_throttler())
-            rest_assistant = await factory.get_rest_assistant()
-            data = await rest_assistant.execute_request(
-                url=self.config.send_msg_url,
-                data=payload,
-                throttler_limit_id="Limits",
-                method=RESTMethod.POST,
+            data = self.cosmos_grpc_client.send_tokens(
+                sender_mnemonic=mnemonic,
+                from_address=address_from,
+                to_address=address_to,
+                amount=amount,
+                denom=self.config.denom,
             )
             return data
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             self.logger().info(f"Error sending transaction: {e}")
             return None
 
+    def get_account_balance(self, sender_address):
+        try:
+            data = self.cosmos_grpc_client.get_balance(sender_address, self.config.denom)
+            return data
+        except Exception as e:
+            self.logger().info(f"Error while getting account balance: {e}")
+            return None
+
     # send random tokens from random sender to random recipient
-    async def execute_random_transactions(self):
-        accounts = [{"key": entry["key"], "address": entry["address"]} for entry in self.config.mnemonic_keys_with_addresses]
+    def execute_random_transactions(self):
         # check if there 2 addresses at least
-        if len(accounts) < 2:
+        if len(self.accounts) < 2:
             self.logger().error("Insufficient accounts to perform a transaction.")
             return
 
-        sender = random.choice(accounts)
+        sender = random.choice(self.accounts)
         sender_key = sender["key"]
         sender_address = sender["address"]
 
-        recipient = random.choice([acc for acc in accounts if acc["address"] != sender_address])
+        recipient = random.choice([acc for acc in self.accounts if acc["address"] != sender_address])
         recipient_address = recipient["address"]
 
         # Random amount in uggez1
@@ -129,11 +146,7 @@ class RandomTransaction(ScriptStrategyBase):
         if amount % 1_000_000 != 0:
             amount = round(amount / 1_000_000) * 1_000_000
         try:
-            balance = await self.get_account_balance(sender_address)
-            uggez1_balance = next(
-                (int(bal["amount"]) for bal in balance["balances"] if bal["denom"] == "uggez1"),
-                0,
-            )
+            uggez1_balance = self.get_account_balance(sender_address)
 
             # check if sender_address has sufficient balance
             if uggez1_balance < (amount + 125_000):
@@ -143,31 +156,72 @@ class RandomTransaction(ScriptStrategyBase):
                 return
 
             self.logger().info(f"Sending {amount} uggez1 from {sender_address} to {recipient_address}")
-
-            await self.send_tokens_via_api(sender_key, sender_address, recipient_address, amount)
+            # retry if failed
+            for i in range(3):
+                try:
+                    tsx_hash = self.send_tokens(sender_key, sender_address, recipient_address, amount)
+                    if tsx_hash:
+                        self.logger().info(f"Transaction sent successfully for {sender_address}: {tsx_hash}")
+                        self.cumulating_transactions.add_transaction(
+                            {"from": sender_address, "to": recipient_address, "amount": amount}
+                        )
+                        break
+                except Exception as e:
+                    self.logger().error(
+                        f"Error while sending transaction for {sender_address}: {e} {i + 1}/3 retrying after 5 seconds... "
+                    )
+                    time.sleep(5)
 
         except Exception as e:
             self.logger().error(f"Error while processing transaction for {sender_address}: {e}")
 
-    def create_throttler(self) -> AsyncThrottler:
-        return AsyncThrottler(self.rate_limits)
+    def format_status(self) -> str:
+        denom = self.config.denom[1:]
+        tsx_info = (
+            f"\nStrategy Config :"
+            f"\nTransaction Amount Range: {self.config.min_tx_amount} - {self.config.max_tx_amount} {denom}"
+            f"\nDelay Order Time: {self.config.min_delay} seconds + Random Delay: 0 - {self.config.max_delay} seconds"
+            f"\nNumber of Accounts: {len(self.accounts)}"
+            "\n"
+            "\nTotal Cumulating Transactions:"
+            f"\nTotal Transactions: {self.cumulating_transactions.total_transactions}"
+            f"\nTotal Amount: {self.convert_from_micro_denom_to_denom(self.cumulating_transactions.total_amount)} {denom}"
+            f"\nAverage Amount: {self.convert_from_micro_denom_to_denom(self.cumulating_transactions.total_amount / self.cumulating_transactions.total_transactions)} {denom}"
+            "\n"
+            "\nCumulating Transactions by Account:"
+        )
 
-    async def get_account_balance(self, sender_address):
-        try:
-            factory = WebAssistantsFactory(self.create_throttler())
-            rest_assistant = await factory.get_rest_assistant()
-            data = await rest_assistant.execute_request(
-                url=f"{self.config.ggezchain_rest_url}/{sender_address}",
-                throttler_limit_id="Limits",
-                method=RESTMethod.GET,
-            )
-            return data
-        except requests.exceptions.RequestException as e:
-            self.logger().info(f"Error while getting account balance: {e}")
-            return None
+        for account in self.accounts:
+            tsx_info += f"\nAccount: {account['address']}"
+            cumulating_transactions = self.cumulating_transactions.get_account_transactions(account["address"])
+            if cumulating_transactions["count"] == 0:
+                tsx_info += "\nTotal Transactions: 0"
+                tsx_info += f"\nTotal Amount: 0 {denom}"
+                tsx_info += f"\nAverage Amount: 0 {denom}"
+            else:
+                tsx_info += f"\nTotal Transactions: {cumulating_transactions['count']}"
+                tsx_info += f"\nTotal Amount: {self.convert_from_micro_denom_to_denom(cumulating_transactions['total'])} {denom}"
+                tsx_info += f"\nAverage Amount: {self.convert_from_micro_denom_to_denom(cumulating_transactions['total'] / cumulating_transactions['count'])} {denom}"
 
-    async def schedule_random_transactions(self):
-        delay_seconds = random.randint(self.config.min_delay, self.config.max_delay)
-        self.logger().info(f"Scheduling next transaction in {delay_seconds} second(s).")
-        await asyncio.sleep(delay_seconds)
-        await self.execute_random_transactions()
+        return tsx_info
+
+    def convert_from_micro_denom_to_denom(self, amount: float):
+        return amount / 1_000_000
+
+    class cumulating_transactions:
+        def __init__(self):
+            # {"address": {"total": 0, "count": 0}}
+            self.transactions_by_account = {}
+            self.total_transactions = 0
+            self.total_amount = 0
+
+        def add_transaction(self, transaction):
+            if transaction["from"] not in self.transactions_by_account:
+                self.transactions_by_account[transaction["from"]] = {"total": 0, "count": 0}
+            self.transactions_by_account[transaction["from"]]["total"] += transaction["amount"]
+            self.transactions_by_account[transaction["from"]]["count"] += 1
+            self.total_transactions += 1
+            self.total_amount += transaction["amount"]
+
+        def get_account_transactions(self, address):
+            return self.transactions_by_account.get(address, {"total": 0, "count": 0})
