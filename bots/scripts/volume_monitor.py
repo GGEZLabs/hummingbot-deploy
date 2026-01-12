@@ -108,10 +108,3 @@ class VolumeMonitor(ScriptStrategyBase):
             text
             + f"\n\n{current_volumes}\nTotal Volume: {total_volume}\n\n{current_prices}\nAverage Price: {round(avg_price, 6)} {self.quote}"
         )
-
-cp hummingbot/scripts/volume_monitor.py hummingbot-backend-api/bots/scripts/volume_monitor.py
-cp hummingbot/scripts/random_transactions.py hummingbot-backend-api/bots/scripts/random_transactions.py
-
-
-cp hummingbot/scripts/volume_monitor.py hummingbot-deploy/bots/scripts/volume_monitor.py
-cp hummingbot/scripts/random_transactions.py hummingbot-deploy/bots/scripts/random_transactions.py
