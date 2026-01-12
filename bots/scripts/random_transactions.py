@@ -179,7 +179,7 @@ class RandomTransaction(ScriptStrategyBase):
         denom = self.config.denom[1:]
         tsx_info = (
             f"\nStrategy Config :"
-            f"\nTransaction Amount Range: {self.config.min_tx_amount} - {self.config.max_tx_amount} {denom}"
+            f"\nTransaction Amount Range: {self.convert_from_micro_denom_to_denom(self.config.min_tx_amount)} - {self.convert_from_micro_denom_to_denom(self.config.max_tx_amount)} {denom}"
             f"\nDelay Order Time: {self.config.min_delay} seconds + Random Delay: 0 - {self.config.max_delay} seconds"
             f"\nNumber of Accounts: {len(self.accounts)}"
             "\n"
@@ -206,7 +206,7 @@ class RandomTransaction(ScriptStrategyBase):
         return tsx_info
 
     def convert_from_micro_denom_to_denom(self, amount: float):
-        return amount / 1_000_000
+        return round(amount / 1_000_000, 6)
 
     class cumulating_transactions:
         def __init__(self):

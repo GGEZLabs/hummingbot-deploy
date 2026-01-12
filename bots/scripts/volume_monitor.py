@@ -67,6 +67,7 @@ class VolumeMonitor(ScriptStrategyBase):
         self.config = config
         self._task = None
         self.last_volumes = {}
+        self.base, self.quote = self.config.trading_pair.split("-")
 
     def on_tick(self):
         # check the volume of the trading pair on each exchange
@@ -96,14 +97,21 @@ class VolumeMonitor(ScriptStrategyBase):
         for exchange in self.config.exchanges:
             if exchange not in self.last_volumes:
                 continue
-            current_volumes += f"\n{exchange}: {self.last_volumes[exchange]} {self.config.trading_pair.split('-')[1]}"
+            current_volumes += f"\n{exchange}: {round(self.last_volumes[exchange])} {self.quote}"
             price = self.connectors[exchange].get_mid_price(self.config.trading_pair)
-            current_prices += f"\n{exchange}: {price} {self.config.trading_pair.split('-')[0]}"
+            current_prices += f"\n{exchange}: {price} {self.quote}"
             total_volume += self.last_volumes[exchange]
             total_price += price
 
         avg_price = total_price / len(self.config.exchanges)
         return (
             text
-            + f"\n\n{current_volumes}\nTotal Volume: {total_volume}\n\n{current_prices}\nAverage Price: {avg_price}"
+            + f"\n\n{current_volumes}\nTotal Volume: {total_volume}\n\n{current_prices}\nAverage Price: {round(avg_price, 6)} {self.quote}"
         )
+
+cp hummingbot/scripts/volume_monitor.py hummingbot-backend-api/bots/scripts/volume_monitor.py
+cp hummingbot/scripts/random_transactions.py hummingbot-backend-api/bots/scripts/random_transactions.py
+
+
+cp hummingbot/scripts/volume_monitor.py hummingbot-deploy/bots/scripts/volume_monitor.py
+cp hummingbot/scripts/random_transactions.py hummingbot-deploy/bots/scripts/random_transactions.py
