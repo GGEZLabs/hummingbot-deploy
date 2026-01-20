@@ -3,9 +3,9 @@ import random
 import time
 from typing import Dict, List
 
-from pydantic import Field, validator
+from pydantic import Field, SecretStr, field_validator
 
-from hummingbot.client.config.config_data_types import BaseClientModel, ClientFieldData
+from hummingbot.client.config.config_data_types import BaseClientModel
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.strategy_v2.utils.cosmos_grpc_client import CosmosGrpcClient
@@ -14,64 +14,69 @@ from hummingbot.strategy_v2.utils.cosmos_grpc_client import CosmosGrpcClient
 class RandomTransactionConfig(BaseClientModel):
     script_file_name: str = Field(default_factory=lambda: os.path.basename(__file__))
     chain_id: str = Field(
-        "ggezchain",
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "chain ID"),
+        default="ggezchain",
+        json_schema_extra={
+            "prompt": "Enter chain ID",
+            "prompt_on_new": True,
+        },
     )
     grpc_url: str = Field(
-        "172.21.10.116:9090",
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "GRPC endpoint"),
+        default="172.21.10.116:9090",
+        json_schema_extra={
+            "prompt": "Enter GRPC endpoint",
+            "prompt_on_new": True,
+        },
     )
     denom: str = Field(
-        "uggez1",
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Denom"),
+        default="uggez1",
+        json_schema_extra={
+            "prompt": "Enter token denom",
+            "prompt_on_new": True,
+        },
     )
-    mnemonic_keys_with_addresses: List[Dict[str, str]] = Field(
-        default=[],
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: (
-                "Enter the mnemonic keys with addresses in the format: " "'mnemonic1:address1,mnemonic2:address2,...'"
-            ),
-        ),
+    mnemonic_keys_with_addresses: SecretStr = Field(
+        default=...,
+        json_schema_extra={
+            "prompt": "Enter mnemonic keys with addresses (format: 'mnemonic1:address1,mnemonic2:address2,...')",
+            "prompt_on_new": True,
+            "is_secure": True,
+        },
     )
     min_tx_amount: int = Field(
-        1_000_000,
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Minimum transaction amount (uggez1)"),
+        default=1_000_000,
+        json_schema_extra={
+            "prompt": "Enter minimum transaction amount (uggez1)",
+            "prompt_on_new": True,
+        },
     )
     max_tx_amount: int = Field(
-        3_000_000,
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Maximum transaction amount (uggez1)"),
+        default=3_000_000,
+        json_schema_extra={
+            "prompt": "Enter maximum transaction amount (uggez1)",
+            "prompt_on_new": True,
+        },
     )
     min_delay: int = Field(
-        60,
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Minimum delay in seconds"),
+        default=60,
+        json_schema_extra={
+            "prompt": "Enter minimum delay in seconds",
+            "prompt_on_new": True,
+        },
     )
     max_delay: int = Field(
-        900,
-        client_data=ClientFieldData(prompt_on_new=True, prompt=lambda mi: "Maximum delay in seconds"),
+        default=900,
+        json_schema_extra={
+            "prompt": "Enter maximum delay in seconds",
+            "prompt_on_new": True,
+        },
     )
 
-    @validator("mnemonic_keys_with_addresses", pre=True, allow_reuse=True, always=True)
-    def validate_mnemonic_keys(cls, v):
+    @field_validator("mnemonic_keys_with_addresses", mode="before")
+    @classmethod
+    def convert_to_secret_str(cls, v):
+        """Convert string input to SecretStr."""
         if isinstance(v, str):
-            mnemonic_list = v.split(",")
-            mnemonic_objects = []
-            for item in mnemonic_list:
-                try:
-                    mnemonic, address = item.split(":")
-                    mnemonic_objects.append({"key": mnemonic.strip(), "address": address.strip()})
-                except ValueError:
-                    raise ValueError(
-                        "Invalid format. Please provide input in the format: "
-                        "'mnemonic1:address1,mnemonic2:address2,...'"
-                    )
-                if len(mnemonic_objects) < 2:
-                    raise ValueError("At least two mnemonic keys with addresses are required.")
-            return mnemonic_objects
-        elif isinstance(v, list):
-            if len(v) < 2:
-                raise ValueError("At least two mnemonic keys with addresses are required.")
-            return v
+            return SecretStr(v)
         return v
 
 
@@ -80,7 +85,9 @@ class RandomTransaction(ScriptStrategyBase):
     def init_markets(self, config: RandomTransactionConfig):
         self.markets = {}
 
-    def __init__(self, connectors: Dict[str, ConnectorBase], config: RandomTransactionConfig):
+    def __init__(
+        self, connectors: Dict[str, ConnectorBase], config: RandomTransactionConfig
+    ):
         super().__init__(connectors)
         self.config = config
         self.cosmos_grpc_client = CosmosGrpcClient(
@@ -89,19 +96,44 @@ class RandomTransaction(ScriptStrategyBase):
         )
         self.last_tx_timestamp = 0
         self.current_random_delay = 0
-        self.accounts = [
-            {"key": entry["key"], "address": entry["address"]} for entry in self.config.mnemonic_keys_with_addresses
-        ]
+        # Parse the decrypted mnemonic string into accounts list
+        self.accounts = self._parse_mnemonics(
+            self.config.mnemonic_keys_with_addresses.get_secret_value()
+        )
+        if len(self.accounts) < 2:
+            raise ValueError("At least two mnemonic keys with addresses are required.")
         self.cumulating_transactions = self.cumulating_transactions()
+
+    def _parse_mnemonics(self, raw: str) -> List[Dict[str, str]]:
+        """Parse mnemonic:address pairs from the decrypted string."""
+        if not raw:
+            return []
+        accounts = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                mnemonic, address = item.split(":")
+                accounts.append({"key": mnemonic.strip(), "address": address.strip()})
+            except ValueError:
+                raise ValueError(
+                    f"Invalid format for '{item}'. Use: 'mnemonic1:address1,mnemonic2:address2,...'"
+                )
+        return accounts
 
     @property
     def is_ready_to_do_tx(self):
-        return self.current_timestamp - self.last_tx_timestamp > self.current_random_delay
+        return (
+            self.current_timestamp - self.last_tx_timestamp > self.current_random_delay
+        )
 
     def on_tick(self):
         if self.is_ready_to_do_tx:
             self.last_tx_timestamp = self.current_timestamp
-            self.current_random_delay = random.randint(self.config.min_delay, self.config.max_delay)
+            self.current_random_delay = random.randint(
+                self.config.min_delay, self.config.max_delay
+            )
             self.execute_random_transactions()
 
     # send token using ggez grpc client
@@ -121,7 +153,9 @@ class RandomTransaction(ScriptStrategyBase):
 
     def get_account_balance(self, sender_address):
         try:
-            data = self.cosmos_grpc_client.get_balance(sender_address, self.config.denom)
+            data = self.cosmos_grpc_client.get_balance(
+                sender_address, self.config.denom
+            )
             return data
         except Exception as e:
             self.logger().info(f"Error while getting account balance: {e}")
@@ -138,7 +172,9 @@ class RandomTransaction(ScriptStrategyBase):
         sender_key = sender["key"]
         sender_address = sender["address"]
 
-        recipient = random.choice([acc for acc in self.accounts if acc["address"] != sender_address])
+        recipient = random.choice(
+            [acc for acc in self.accounts if acc["address"] != sender_address]
+        )
         recipient_address = recipient["address"]
 
         # Random amount in uggez1
@@ -155,15 +191,25 @@ class RandomTransaction(ScriptStrategyBase):
                 )
                 return
 
-            self.logger().info(f"Sending {amount} uggez1 from {sender_address} to {recipient_address}")
+            self.logger().info(
+                f"Sending {amount} uggez1 from {sender_address} to {recipient_address}"
+            )
             # retry if failed
             for i in range(3):
                 try:
-                    tsx_hash = self.send_tokens(sender_key, sender_address, recipient_address, amount)
+                    tsx_hash = self.send_tokens(
+                        sender_key, sender_address, recipient_address, amount
+                    )
                     if tsx_hash:
-                        self.logger().info(f"Transaction sent successfully for {sender_address}: {tsx_hash}")
+                        self.logger().info(
+                            f"Transaction sent successfully for {sender_address}: {tsx_hash}"
+                        )
                         self.cumulating_transactions.add_transaction(
-                            {"from": sender_address, "to": recipient_address, "amount": amount}
+                            {
+                                "from": sender_address,
+                                "to": recipient_address,
+                                "amount": amount,
+                            }
                         )
                         break
                 except Exception as e:
@@ -173,7 +219,9 @@ class RandomTransaction(ScriptStrategyBase):
                     time.sleep(5)
 
         except Exception as e:
-            self.logger().error(f"Error while processing transaction for {sender_address}: {e}")
+            self.logger().error(
+                f"Error while processing transaction for {sender_address}: {e}"
+            )
 
     def format_status(self) -> str:
         denom = self.config.denom[1:]
@@ -193,7 +241,11 @@ class RandomTransaction(ScriptStrategyBase):
 
         for account in self.accounts:
             tsx_info += f"\nAccount: {account['address']}"
-            cumulating_transactions = self.cumulating_transactions.get_account_transactions(account["address"])
+            cumulating_transactions = (
+                self.cumulating_transactions.get_account_transactions(
+                    account["address"]
+                )
+            )
             if cumulating_transactions["count"] == 0:
                 tsx_info += "\nTotal Transactions: 0"
                 tsx_info += f"\nTotal Amount: 0 {denom}"
@@ -217,8 +269,13 @@ class RandomTransaction(ScriptStrategyBase):
 
         def add_transaction(self, transaction):
             if transaction["from"] not in self.transactions_by_account:
-                self.transactions_by_account[transaction["from"]] = {"total": 0, "count": 0}
-            self.transactions_by_account[transaction["from"]]["total"] += transaction["amount"]
+                self.transactions_by_account[transaction["from"]] = {
+                    "total": 0,
+                    "count": 0,
+                }
+            self.transactions_by_account[transaction["from"]]["total"] += transaction[
+                "amount"
+            ]
             self.transactions_by_account[transaction["from"]]["count"] += 1
             self.total_transactions += 1
             self.total_amount += transaction["amount"]
